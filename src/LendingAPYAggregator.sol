@@ -5,59 +5,16 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-//import {IPool} from "aave-v3-core/contracts/interfaces/IPool.sol";
+import {IPool} from "aave-v3-core/contracts/interfaces/IPool.sol";
+import {MarketParams} from "lib/morpho-blue/src/interfaces/IMorpho.sol";
+import {DataTypes} from "aave-v3-core/contracts/protocol/libraries/types/DataTypes.sol";
+import {IAvalancheMorphoCCIPSender} from "./interfaces/IAvalancheMorphoCCIPSender.sol";
 
 /**
  * @title LendingAPYAggregator
  * @dev Aggregates lending/borrowing APYs from Aave V3 (Avalanche) and Morpho (Base via bridge)
  * @notice This contract helps users find the best lending rates across protocols
  */
-
-// Aave V3 Pool interface (simplified);
-interface IPool {
-    struct ReserveData {
-        uint256 configuration;
-        uint128 liquidityIndex;
-        uint128 currentLiquidityRate;
-        uint128 variableBorrowIndex;
-        uint128 currentVariableBorrowRate;
-        uint128 currentStableBorrowRate;
-        uint40 lastUpdateTimestamp;
-        uint16 id;
-        address aTokenAddress;
-        address stableDebtTokenAddress;
-        address variableDebtTokenAddress;
-        address interestRateStrategyAddress;
-        uint128 accruedToTreasury;
-        uint128 unbacked;
-        uint128 isolationModeTotalDebt;
-    }
-    
-        function getReserveData(address asset) external view returns (ReserveData memory);
-        function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode) external;
-        function withdraw(address asset, uint256 amount, address to) external returns (uint256);
-        function borrow(address asset, uint256 amount, uint256 interestRateMode, uint16 referralCode, address onBehalfOf) external;
-        function repay(address asset, uint256 amount, uint256 interestRateMode, address onBehalfOf) external returns (uint256);
-        function getUserAccountData(address user) external view returns (
-            uint256 totalCollateralBase,
-            uint256 totalDebtBase,
-            uint256 availableBorrowsBase,
-            uint256 currentLiquidationThreshold,
-            uint256 ltv,
-            uint256 healthFactor
-        );
-    }
-
-//Cross-chain bridge interface for Morpho on Base
-interface IMorphoCrossChainBridge {
-    function getSupplyAPY(address asset) external view returns (uint256);
-    function getBorrowAPY(address asset) external view returns (uint256);
-    function bridgeAndSupply(address asset, uint256 amount, address onBehalfOf, bytes calldata bridgeData) external;
-    function bridgeAndBorrow(address asset, uint256 amount, address onBehalfOf, bytes calldata bridgeData) external;
-    function withdrawAndBridge(address asset, uint256 amount, address to, bytes calldata bridgeData) external;
-    function repayAndBridge(address asset, uint256 amount, address onBehalfOf, bytes calldata bridgeData) external;
-    function estimateBridgeFee(address asset, uint256 amount) external view returns (uint256);
-}
 
 // Position tracking for users
 struct UserPosition {
@@ -89,7 +46,7 @@ contract LendingAPYAggregator is Ownable, ReentrancyGuard {
     
     // Contract addresses
     IPool public immutable aavePool;
-    IMorphoCrossChainBridge public immutable morphoBridge;
+    IAvalancheMorphoCCIPSender public immutable morphoSender;
     
     // Supported assets
     mapping(address => bool) public supportedAssets;
@@ -97,6 +54,9 @@ contract LendingAPYAggregator is Ownable, ReentrancyGuard {
     
     // User positions
     mapping(address => mapping(address => UserPosition)) public userPositions;
+    
+    // Map asset => MarketParams for Morpho
+    mapping(address => MarketParams) public morphoMarketParams;
     
     // Events
     event AssetAdded(address indexed asset);
@@ -112,14 +72,21 @@ contract LendingAPYAggregator is Ownable, ReentrancyGuard {
     error InsufficientBalance();
     error BridgeError();
     
+    // Modifier must be declared after state variables and errors
+    modifier onlySupportedAssetAndNonZeroAmount(address asset, uint256 amount) {
+        if (!supportedAssets[asset]) revert UnsupportedAsset();
+        if (amount == 0) revert InvalidAmount();
+        _;
+    }
+    
     constructor(
         address _aavePool,
-        address _morphoBridge,
+        address _morphoSender,
         address _owner
 
     ) Ownable(_owner) {
         aavePool = IPool(_aavePool);
-        morphoBridge = IMorphoCrossChainBridge(_morphoBridge);
+        morphoSender = IAvalancheMorphoCCIPSender(_morphoSender);
 
     }
     
@@ -128,7 +95,7 @@ contract LendingAPYAggregator is Ownable, ReentrancyGuard {
      * @param asset Address of the asset to support
      */
     function addSupportedAsset(address asset) external onlyOwner {
-        require(!supportedAssets[asset], "Asset already supported");
+        if (supportedAssets[asset]) revert("Asset already supported");
         supportedAssets[asset] = true;
         assetList.push(asset);
         emit AssetAdded(asset);
@@ -139,9 +106,8 @@ contract LendingAPYAggregator is Ownable, ReentrancyGuard {
      * @param asset Address of the asset to remove
      */
     function removeSupportedAsset(address asset) external onlyOwner {
-        require(supportedAssets[asset], "Asset not supported");
+        if (!supportedAssets[asset]) revert("Asset not supported");
         supportedAssets[asset] = false;
-        
         // Remove from array
         for (uint256 i = 0; i < assetList.length; i++) {
             if (assetList[i] == asset) {
@@ -153,230 +119,134 @@ contract LendingAPYAggregator is Ownable, ReentrancyGuard {
         emit AssetRemoved(asset);
     }
     
-    /**
-     * @dev Get comprehensive APY comparison for an asset
-     * @param asset The asset to compare
-     * @return comparison APY comparison data
-     */
-    function getAPYComparison(address asset) external view returns (APYComparison memory comparison) {
-        if (!supportedAssets[asset]) revert UnsupportedAsset();
-        
-        // Get Aave APYs
-        IPool.ReserveData memory reserveData = aavePool.getReserveData(asset);
-        comparison.aaveSupplyAPY = _rayToPercentage(reserveData.currentLiquidityRate);
-        comparison.aaveBorrowAPY = _rayToPercentage(reserveData.currentVariableBorrowRate);
-        
-        // Get Morpho APYs
-        comparison.morphoSupplyAPY = morphoBridge.getSupplyAPY(asset);
-        comparison.morphoBorrowAPY = morphoBridge.getBorrowAPY(asset);
-        
-        // Determine better protocol
-        comparison.aaveBetterForSupply = comparison.aaveSupplyAPY > comparison.morphoSupplyAPY;
-        comparison.aaveBetterForBorrow = comparison.aaveBorrowAPY < comparison.morphoBorrowAPY;
-        
-        // Get bridge fee estimate (for 1000 USDC equivalent)
-        comparison.bridgeFee = morphoBridge.estimateBridgeFee(asset, 1000 * 1e6);
-    }
+    // /**
+    //  * @dev Get comprehensive APY comparison for an asset
+    //  * @notice APY data is now fetched off-chain; this function is deprecated and returns empty values.
+    //  */
+    // function getAPYComparison(address asset) external pure returns (APYComparison memory comparison) {
+    //     // All APY data is fetched off-chain in the frontend.
+    //     // This function is deprecated and returns empty/default values.
+    //     return comparison;
+    // }
+    
+    // /**
+    //  * @dev Get best protocol for supply
+    //  * @notice Protocol selection is now handled off-chain by the frontend; this function is deprecated and returns default values.
+    //  */
+    // function getBestSupplyProtocol(address asset, uint256 amount) 
+    //     external 
+    //     pure 
+    //     returns (bool useAave, uint256 netAPY) 
+    // {
+    //     // Protocol selection is now handled off-chain by the frontend.
+    //     // This function is deprecated and returns default values.
+    //     return (true, 0);
+    // }
+    
+    // /**
+    //  * @dev Get best protocol for borrowing
+    //  * @notice Protocol selection is now handled off-chain by the frontend; this function is deprecated and returns default values.
+    //  */
+    // function getBestBorrowProtocol(address asset, uint256 amount) 
+    //     external 
+    //     pure 
+    //     returns (bool useAave, uint256 netAPY) 
+    // {
+    //     // Protocol selection is now handled off-chain by the frontend.
+    //     // This function is deprecated and returns default values.
+    //     return (true, 0);
+    // }
     
     /**
-     * @dev Get best protocol for supply
+     * @dev Supply to Aave
      * @param asset The asset to supply
      * @param amount The amount to supply
-     * @return useAave True if Aave is better, false if Morpho is better
-     * @return netAPY Net APY after considering bridge costs
      */
-    function getBestSupplyProtocol(address asset, uint256 amount) 
-        external 
-        view 
-        returns (bool useAave, uint256 netAPY) 
-    {
-        APYComparison memory comparison = this.getAPYComparison(asset);
-        
-        if (comparison.aaveBetterForSupply) {
-            useAave = true;
-            netAPY = comparison.aaveSupplyAPY;
-        } else {
-            // Calculate net APY for Morpho considering bridge costs
-            uint256 bridgeFee = morphoBridge.estimateBridgeFee(asset, amount);
-            uint256 bridgeCostPercentage = (bridgeFee * PERCENTAGE_FACTOR) / amount;
-            
-            if (comparison.morphoSupplyAPY > bridgeCostPercentage) {
-                useAave = false;
-                netAPY = comparison.morphoSupplyAPY - bridgeCostPercentage;
-            } else {
-                useAave = true;
-                netAPY = comparison.aaveSupplyAPY;
-            }
-        }
-    }
-    
-    /**
-     * @dev Get best protocol for borrowing
-     * @param asset The asset to borrow
-     * @param amount The amount to borrow
-     * @return useAave True if Aave is better, false if Morpho is better
-     * @return netAPY Net APY after considering bridge costs
-     */
-    function getBestBorrowProtocol(address asset, uint256 amount) 
-        external 
-        view 
-        returns (bool useAave, uint256 netAPY) 
-    {
-        APYComparison memory comparison = this.getAPYComparison(asset);
-        
-        if (comparison.aaveBetterForBorrow) {
-            useAave = true;
-            netAPY = comparison.aaveBorrowAPY;
-        } else {
-            // Calculate net APY for Morpho considering bridge costs
-            uint256 bridgeFee = morphoBridge.estimateBridgeFee(asset, amount);
-            uint256 bridgeCostPercentage = (bridgeFee * PERCENTAGE_FACTOR) / amount;
-            
-            uint256 morphoTotalCost = comparison.morphoBorrowAPY + bridgeCostPercentage;
-            
-            if (morphoTotalCost < comparison.aaveBorrowAPY) {
-                useAave = false;
-                netAPY = morphoTotalCost;
-            } else {
-                useAave = true;
-                netAPY = comparison.aaveBorrowAPY;
-            }
-        }
-    }
-    
-    /**
-     * @dev Supply to the best protocol automatically
-     * @param asset The asset to supply
-     * @param amount The amount to supply
-     * @param bridgeData Bridge-specific data (if using Morpho)
-     */
-    function supplyToBest(
-        address asset, 
-        uint256 amount, 
-        bytes calldata bridgeData
-    ) external nonReentrant {
+    function supplyToAave(address asset, uint256 amount) external nonReentrant {
         if (!supportedAssets[asset]) revert UnsupportedAsset();
         if (amount == 0) revert InvalidAmount();
-        
-        (bool useAave,) = this.getBestSupplyProtocol(asset, amount);
-        
+
         IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
-        
-        if (useAave) {
-            IERC20(asset).approve(address(aavePool), amount);
-            aavePool.supply(asset, amount, msg.sender, 0);
-            userPositions[msg.sender][asset].aaveSupplied += amount;
-        } else {
-            IERC20(asset).approve(address(morphoBridge), amount);
-            morphoBridge.bridgeAndSupply(asset, amount, msg.sender, bridgeData);
-            userPositions[msg.sender][asset].morphoSupplied += amount;
-        }
-        
+        IERC20(asset).approve(address(aavePool), amount);
+        aavePool.supply(asset, amount, msg.sender, 0);
+        userPositions[msg.sender][asset].aaveSupplied += amount;
         userPositions[msg.sender][asset].lastUpdate = block.timestamp;
-        emit SupplyExecuted(msg.sender, asset, amount, useAave);
+        emit SupplyExecuted(msg.sender, asset, amount, true);
     }
     
     /**
-     * @dev Borrow from the best protocol automatically
-     * @param asset The asset to borrow
-     * @param amount The amount to borrow
-     * @param bridgeData Bridge-specific data (if using Morpho)
+     * @dev Supply to Morpho (via bridge)
+     * @param asset The asset to supply
+     * @param amount The amount to supply
      */
-    function borrowFromBest(
-        address asset, 
-        uint256 amount, 
-        bytes calldata bridgeData
-    ) external nonReentrant {
+    function supplyToMorpho(address asset, uint256 amount) external payable nonReentrant {
         if (!supportedAssets[asset]) revert UnsupportedAsset();
         if (amount == 0) revert InvalidAmount();
-        
-        (bool useAave,) = this.getBestBorrowProtocol(asset, amount);
-        
-        if (useAave) {
-            aavePool.borrow(asset, amount, 2, 0, msg.sender); // Variable rate
-            userPositions[msg.sender][asset].aaveBorrowed += amount;
-        } else {
-            morphoBridge.bridgeAndBorrow(asset, amount, msg.sender, bridgeData);
-            userPositions[msg.sender][asset].morphoBorrowed += amount;
-        }
-        
+
+        MarketParams memory market = morphoMarketParams[asset];
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(asset).approve(address(morphoSender), amount);
+        morphoSender.bridgeAndSupply{value: msg.value}(market, amount, msg.sender);
+        userPositions[msg.sender][asset].morphoSupplied += amount;
         userPositions[msg.sender][asset].lastUpdate = block.timestamp;
-        emit BorrowExecuted(msg.sender, asset, amount, useAave);
+        emit SupplyExecuted(msg.sender, asset, amount, false);
     }
     
-    // /**
-    //  * @dev Manual supply to specific protocol
-    //  * @param asset The asset to supply
-    //  * @param amount The amount to supply
-    //  * @param useAave True for Aave, false for Morpho
-    //  * @param bridgeData Bridge-specific data (if using Morpho)
-    //  */
-    // function supply(
-    //     address asset, 
-    //     uint256 amount, 
-    //     bool useAave, 
-    //     bytes calldata bridgeData
-    // ) external nonReentrant {
-    //     if (!supportedAssets[asset]) revert UnsupportedAsset();
-    //     if (amount == 0) revert InvalidAmount();
-        
-    //     IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
-        
-    //     if (useAave) {
-    //         IERC20(asset).approve(address(aavePool), amount);
-    //         aavePool.supply(asset, amount, msg.sender, 0);
-    //         userPositions[msg.sender][asset].aaveSupplied += amount;
-    //     } else {
-    //         IERC20(asset).approve(address(morphoBridge), amount);
-    //         morphoBridge.bridgeAndSupply(asset, amount, msg.sender, bridgeData);
-    //         userPositions[msg.sender][asset].morphoSupplied += amount;
-    //     }
-        
-    //     userPositions[msg.sender][asset].lastUpdate = block.timestamp;
-    //     emit SupplyExecuted(msg.sender, asset, amount, useAave);
-    // }
-    
-    // /**
-    //  * @dev Manual borrow from specific protocol
-    //  * @param asset The asset to borrow
-    //  * @param amount The amount to borrow
-    //  * @param useAave True for Aave, false for Morpho
-    //  * @param bridgeData Bridge-specific data (if using Morpho)
-    //  */
-    // function borrow(
-    //     address asset, 
-    //     uint256 amount, 
-    //     bool useAave, 
-    //     bytes calldata bridgeData
-    // ) external nonReentrant {
-    //     if (!supportedAssets[asset]) revert UnsupportedAsset();
-    //     if (amount == 0) revert InvalidAmount();
-        
-    //     if (useAave) {
-    //         aavePool.borrow(asset, amount, 2, 0, msg.sender);
-    //         userPositions[msg.sender][asset].aaveBorrowed += amount;
-    //     } else {
-    //         morphoBridge.bridgeAndBorrow(asset, amount, msg.sender, bridgeData);
-    //         userPositions[msg.sender][asset].morphoBorrowed += amount;
-    //     }
-        
-    //     userPositions[msg.sender][asset].lastUpdate = block.timestamp;
-    //     emit BorrowExecuted(msg.sender, asset, amount, useAave);
-    // }
+    /**
+     * @dev Borrow from Aave
+     * @param asset The asset to borrow
+     * @param amount The amount to borrow
+     */
+    function borrowFromAave(address asset, uint256 amount) external nonReentrant {
+        if (!supportedAssets[asset]) revert UnsupportedAsset();
+        if (amount == 0) revert InvalidAmount();
+
+        aavePool.borrow(asset, amount, 2, 0, msg.sender); // 2 = variable rate, 0 = referral
+        userPositions[msg.sender][asset].aaveBorrowed += amount;
+        userPositions[msg.sender][asset].lastUpdate = block.timestamp;
+        emit BorrowExecuted(msg.sender, asset, amount, true);
+    }
     
     /**
-     * @dev Get user's account data from Aave
-     * @param user The user address
+     * @dev Borrow from Morpho (via bridge)
+     * @param asset The asset to borrow
+     * @param amount The amount to borrow
+     * @param receiver The address to receive the borrowed funds
      */
-    function getUserAccountData(address user) external view returns (
-        uint256 totalCollateralBase,
-        uint256 totalDebtBase,
-        uint256 availableBorrowsBase,
-        uint256 currentLiquidationThreshold,
-        uint256 ltv,
-        uint256 healthFactor
-    ) {
-        return aavePool.getUserAccountData(user);
+    function borrowFromMorpho(address asset, uint256 amount, address receiver) external payable nonReentrant {
+        if (!supportedAssets[asset]) revert UnsupportedAsset();
+        if (amount == 0) revert InvalidAmount();
+
+        MarketParams memory market = morphoMarketParams[asset];
+        morphoSender.bridgeAndBorrow{value: msg.value}(market, amount, msg.sender, receiver);
+        userPositions[msg.sender][asset].morphoBorrowed += amount;
+        userPositions[msg.sender][asset].lastUpdate = block.timestamp;
+        emit BorrowExecuted(msg.sender, asset, amount, false);
+    }
+    
+    /**
+     * @dev Get user's position for an asset as tracked by the aggregator.
+     * @param user The user address
+     * @param asset The asset address
+     * @return aaveSupplied Amount supplied to Aave
+     * @return aaveBorrowed Amount borrowed from Aave
+     * @return morphoSupplied Amount supplied to Morpho
+     * @return morphoBorrowed Amount borrowed from Morpho
+     * @return lastUpdate Last update timestamp
+     */
+    function getAggregatorUserPosition(address user, address asset)
+        external
+        view
+        returns (
+            uint256 aaveSupplied,
+            uint256 aaveBorrowed,
+            uint256 morphoSupplied,
+            uint256 morphoBorrowed,
+            uint256 lastUpdate
+        )
+    {
+        UserPosition memory pos = userPositions[user][asset];
+        return (pos.aaveSupplied, pos.aaveBorrowed, pos.morphoSupplied, pos.morphoBorrowed, pos.lastUpdate);
     }
     
     /**
@@ -386,20 +256,76 @@ contract LendingAPYAggregator is Ownable, ReentrancyGuard {
         return assetList;
     }
     
-    /** 
-     * @dev Convert ray (1e27) to percentage (1e18)
-     * @param ray The ray value to convert
-     */
-    function _rayToPercentage(uint256 ray) private pure returns (uint256) {
-        return ray / 1e9;
-    }
     
     /**
-     * @dev Emergency withdraw function
+     * @dev Emergency withdraw function from this contract
      * @param asset The asset to withdraw
      * @param amount The amount to withdraw
      */
     function emergencyWithdraw(address asset, uint256 amount) external onlyOwner {
         IERC20(asset).safeTransfer(owner(), amount);
+    }
+
+    // Add admin function to set MarketParams for each asset
+    function setMorphoMarketParams(address asset, MarketParams calldata params) external onlyOwner {
+        morphoMarketParams[asset] = params;
+    }
+
+    /**
+     * @dev Withdraw from Aave
+     * @param asset The asset to withdraw
+     * @param amount The amount to withdraw
+     */
+    function withdrawFromAave(address asset, uint256 amount) external nonReentrant onlySupportedAssetAndNonZeroAmount(asset, amount) returns (uint256) {
+        uint256 withdrawn = aavePool.withdraw(asset, amount, msg.sender);
+        userPositions[msg.sender][asset].aaveSupplied -= withdrawn;
+        emit WithdrawExecuted(msg.sender, asset, withdrawn, true);
+        return withdrawn;
+    }
+
+    /**
+     * @dev Withdraw from Morpho (via bridge)
+     * @param asset The asset to withdraw
+     * @param amount The amount to withdraw
+     * @param receiver The address to receive the withdrawn funds
+     */
+    function withdrawFromMorpho(address asset, uint256 amount, address receiver) external payable nonReentrant onlySupportedAssetAndNonZeroAmount(asset, amount) {
+        MarketParams memory market = morphoMarketParams[asset];
+        morphoSender.bridgeAndWithdraw{value: msg.value}(market, amount, msg.sender, receiver);
+        userPositions[msg.sender][asset].morphoSupplied -= amount;
+        emit WithdrawExecuted(msg.sender, asset, amount, false);
+    }
+
+    /**
+     * @dev Repay Aave debt
+     * @param asset The asset to repay
+     * @param amount The amount to repay
+     * @return repaid The actual amount repaid
+     */
+    function repayToAave(address asset, uint256 amount) external nonReentrant onlySupportedAssetAndNonZeroAmount(asset, amount) returns (uint256 repaid) {
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(asset).approve(address(aavePool), amount);
+        repaid = aavePool.repay(asset, amount, 2, msg.sender); // 2 = variable rate
+        userPositions[msg.sender][asset].aaveBorrowed -= repaid;
+        userPositions[msg.sender][asset].lastUpdate = block.timestamp;
+        emit RepayExecuted(msg.sender, asset, repaid, true);
+        return repaid;
+    }
+
+    /**
+     * @dev Repay Morpho debt (via bridge)
+     * @param asset The asset to repay
+     * @param amount The amount to repay
+     * @return repaid The amount repaid
+     */
+    function repayToMorpho(address asset, uint256 amount) external payable nonReentrant onlySupportedAssetAndNonZeroAmount(asset, amount) returns (uint256 repaid) {
+        MarketParams memory market = morphoMarketParams[asset];
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(asset).approve(address(morphoSender), amount);
+        morphoSender.bridgeAndRepay{value: msg.value}(market, amount, msg.sender);
+        userPositions[msg.sender][asset].morphoBorrowed -= amount;
+        userPositions[msg.sender][asset].lastUpdate = block.timestamp;
+        emit RepayExecuted(msg.sender, asset, amount, false);
+        return amount;
     }
 }
