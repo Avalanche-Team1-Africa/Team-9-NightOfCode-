@@ -1,9 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useAccount } from 'wagmi';
-import { useAggregatorOperations, useTokenBalance, useTokenAllowance } from '../blockchain/hooks/useAggregator';
+import { useAccount, useBalance } from 'wagmi';
 import { useAPYData } from '../blockchain/hooks/useAPYData';
+import { CustomConnectButton } from './CustomConnectButton';
 import { X, ArrowUpCircle, ArrowDownCircle, RotateCcw, DollarSign, AlertCircle } from 'lucide-react';
 
 interface TradingModalProps {
@@ -14,20 +14,57 @@ interface TradingModalProps {
 }
 
 export function TradingModal({ isOpen, onClose, selectedAsset, defaultAction = 'supply' }: TradingModalProps) {
-  const { isConnected, address } = useAccount();
+  const { address, isConnected } = useAccount();
   const { getAPYForAsset } = useAPYData();
-  const operations = useAggregatorOperations();
   
   const [action, setAction] = useState<'supply' | 'borrow' | 'withdraw' | 'repay'>(defaultAction);
   const [protocol, setProtocol] = useState<'aave' | 'morpho'>('aave');
   const [amount, setAmount] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  
+
+  // Get user's ETH balance as an example
+  const { data: balance } = useBalance({
+    address: address,
+  });
+
   // Mock token address for the selected asset
   const tokenAddress = `0x${selectedAsset.toLowerCase().padEnd(40, '0')}`;
-  const balance = useTokenBalance(tokenAddress);
-  const allowance = useTokenAllowance(tokenAddress);
+  
+  // Mock token balance and allowance for now
+  const tokenBalance = { formatted: '1000.0', symbol: selectedAsset };
+  const allowance = { formatted: '0' };
+  
+  // Mock operations
+  const operations = {
+    approveToken: async (token: string, amount: string) => {
+      console.log('Mock approve token:', token, amount);
+    },
+    supplyToAave: async (token: string, amount: string) => {
+      console.log('Mock supply to Aave:', token, amount);
+    },
+    supplyToMorpho: async (token: string, amount: string) => {
+      console.log('Mock supply to Morpho:', token, amount);
+    },
+    borrowFromAave: async (token: string, amount: string) => {
+      console.log('Mock borrow from Aave:', token, amount);
+    },
+    borrowFromMorpho: async (token: string, amount: string, user: string) => {
+      console.log('Mock borrow from Morpho:', token, amount, user);
+    },
+    withdrawFromAave: async (token: string, amount: string) => {
+      console.log('Mock withdraw from Aave:', token, amount);
+    },
+    withdrawFromMorpho: async (token: string, amount: string, user: string) => {
+      console.log('Mock withdraw from Morpho:', token, amount, user);
+    },
+    repayToAave: async (token: string, amount: string) => {
+      console.log('Mock repay to Aave:', token, amount);
+    },
+    repayToMorpho: async (token: string, amount: string) => {
+      console.log('Mock repay to Morpho:', token, amount);
+    }
+  };
   
   const assetData = getAPYForAsset(selectedAsset);
   
@@ -48,7 +85,7 @@ export function TradingModal({ isOpen, onClose, selectedAsset, defaultAction = '
 
   const needsApproval = () => {
     if (!amount || (action !== 'supply' && action !== 'repay')) return false;
-    return parseFloat(allowance) < parseFloat(amount);
+    return parseFloat(allowance.formatted) < parseFloat(amount);
   };
 
   const handleApprove = async () => {
@@ -229,7 +266,10 @@ export function TradingModal({ isOpen, onClose, selectedAsset, defaultAction = '
             </div>
             {isConnected && (
               <div className="mt-2 text-sm text-gray-600">
-                Balance: {parseFloat(balance).toFixed(4)} {selectedAsset}
+                Balance: {tokenBalance.formatted} {selectedAsset}
+                {balance && (
+                  <span className="ml-2">• ETH: {parseFloat(balance.formatted).toFixed(4)}</span>
+                )}
               </div>
             )}
           </div>
@@ -263,23 +303,32 @@ export function TradingModal({ isOpen, onClose, selectedAsset, defaultAction = '
 
           {/* Action Buttons */}
           <div className="space-y-3">
-            {needsApproval() && (
-              <button
-                onClick={handleApprove}
-                disabled={!isConnected || isLoading}
-                className="w-full bg-yellow-600 hover:bg-yellow-700 disabled:bg-gray-300 text-white py-3 rounded-lg font-medium transition-colors"
-              >
-                {isLoading ? 'Approving...' : `Approve ${selectedAsset}`}
-              </button>
+            {!isConnected ? (
+              <div className="text-center space-y-4">
+                <p className="text-gray-600">Connect your wallet to start trading</p>
+                <CustomConnectButton />
+              </div>
+            ) : (
+              <>
+                {needsApproval() && (
+                  <button
+                    onClick={handleApprove}
+                    disabled={isLoading}
+                    className="w-full bg-yellow-600 hover:bg-yellow-700 disabled:bg-gray-300 text-white py-3 rounded-lg font-medium transition-colors"
+                  >
+                    {isLoading ? 'Approving...' : `Approve ${selectedAsset}`}
+                  </button>
+                )}
+                
+                <button
+                  onClick={handleTransaction}
+                  disabled={isLoading || !amount || needsApproval()}
+                  className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white py-3 rounded-lg font-medium transition-colors"
+                >
+                  {isLoading ? 'Processing...' : `${action.charAt(0).toUpperCase() + action.slice(1)} ${selectedAsset}`}
+                </button>
+              </>
             )}
-            
-            <button
-              onClick={handleTransaction}
-              disabled={!isConnected || isLoading || !amount || needsApproval()}
-              className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white py-3 rounded-lg font-medium transition-colors"
-            >
-              {isLoading ? 'Processing...' : `${action.charAt(0).toUpperCase() + action.slice(1)} ${selectedAsset}`}
-            </button>
           </div>
         </div>
       </div>

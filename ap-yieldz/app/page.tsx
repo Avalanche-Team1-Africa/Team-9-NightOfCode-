@@ -1,7 +1,6 @@
 'use client';
 
-import { useState } from 'react';
-import { Navigation } from './components/Navigation';
+import React, { useState } from 'react';
 import { Dashboard } from './components/Dashboard';
 import { APYComparisonTable } from './components/APYComparisonTable';
 import { Portfolio } from './components/Portfolio';
@@ -41,9 +40,7 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <Navigation />
-
+    <>
       {/* Hero Section */}
       <section className="bg-gradient-to-br from-green-50 to-green-100 py-12">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -171,6 +168,6 @@ export default function Home() {
         selectedAsset={tradingModal.asset}
         defaultAction={tradingModal.action}
       />
-    </div>
+    </>
   );
 }

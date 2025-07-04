@@ -1,19 +1,35 @@
-import { createConfig, http } from 'wagmi';
-import { avalanche, base } from 'wagmi/chains';
-import { metaMask, walletConnect } from 'wagmi/connectors';
+import { getDefaultConfig, getDefaultWallets } from '@rainbow-me/rainbowkit';
+import { avalancheFuji } from 'wagmi/chains';
+import {
+  injectedWallet,
+} from "@rainbow-me/rainbowkit/wallets";
+import { http, createStorage, cookieStorage } from 'wagmi';
 
-const projectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || 'your-project-id';
+if (!process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID) {
+  throw new Error('Missing NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID');
+}
 
-export const config = createConfig({
-  chains: [avalanche, base],
-  connectors: [
-    metaMask(),
-    walletConnect({ projectId })
+const { wallets } = getDefaultWallets();
+
+export const config = getDefaultConfig({
+  appName: 'Alligator',
+  projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID,
+  wallets: [
+    {
+      groupName: "Core Wallet",
+      wallets: [injectedWallet],
+    },
+  ],
+  chains: [
+    avalancheFuji,
   ],
   transports: {
-    [avalanche.id]: http(process.env.NEXT_PUBLIC_AVALANCHE_RPC || 'api.avax-test.network/ext/bc/C/rpcc'),
-    [base.id]: http(process.env.NEXT_PUBLIC_BASE_RPC || 'https://mainnet.base.org'),
+    [avalancheFuji.id]: http(process.env.NEXT_PUBLIC_AVALANCHE_FUJI_RPC || 'https://api.avax-test.network/ext/bc/C/rpc'),
   },
+  ssr: true,
+  storage: createStorage({
+    storage: cookieStorage,
+  }),
 });
 
 export const LENDING_APY_AGGREGATOR_ADDRESS = process.env.NEXT_PUBLIC_LENDING_APY_AGGREGATOR_ADDRESS || '0x...';

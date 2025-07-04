@@ -3,6 +3,8 @@
 import { useState, useEffect } from 'react';
 import { useAPYData } from '../blockchain/hooks/useAPYData';
 import { TrendingUp, TrendingDown, ExternalLink, RefreshCw } from 'lucide-react';
+import { LoadingState } from './LoadingSpinner';
+import Alert from './Alert';
 
 interface APYTableProps {
   onAssetSelect?: (asset: string) => void;
@@ -69,22 +71,19 @@ export function APYComparisonTable({ onAssetSelect }: APYTableProps) {
     }
   };
 
-  if (loading) {
+  // Loading state
+  if (loading && apyData.length === 0) {
     return (
-      <div className="bg-white rounded-lg shadow-lg p-6">
-        <div className="flex items-center justify-between mb-6">
-          <h2 className="text-2xl font-bold text-gray-900">APY Comparison</h2>
-          <RefreshCw className="animate-spin h-5 w-5 text-gray-500" />
+      <div className="bg-white rounded-lg shadow-lg">
+        <div className="p-6 border-b border-gray-200">
+          <h2 className="text-xl font-semibold text-gray-900">APY Comparison</h2>
         </div>
-        <div className="animate-pulse space-y-4">
-          {[...Array(4)].map((_, i) => (
-            <div key={i} className="h-12 bg-gray-200 rounded"></div>
-          ))}
-        </div>
+        <LoadingState message="Loading APY data..." />
       </div>
     );
   }
 
+  // Error state
   if (error) {
     return (
       <div className="bg-white rounded-lg shadow-lg p-6">
@@ -104,14 +103,26 @@ export function APYComparisonTable({ onAssetSelect }: APYTableProps) {
 
   return (
     <div className="bg-white rounded-lg shadow-lg overflow-hidden">
+      {/* Show error alert if there's an error */}
+      {error && (
+        <div className="p-4 border-b border-gray-200">
+          <Alert 
+            type="warning" 
+            message={error}
+            dismissible={true}
+          />
+        </div>
+      )}
+      
       <div className="px-6 py-4 border-b border-gray-200">
         <div className="flex items-center justify-between">
           <h2 className="text-2xl font-bold text-gray-900">APY Comparison</h2>
           <button
             onClick={refresh}
             className="flex items-center space-x-2 text-gray-600 hover:text-gray-900 transition-colors"
+            disabled={loading}
           >
-            <RefreshCw size={16} />
+            <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
             <span className="text-sm">Refresh</span>
           </button>
         </div>
