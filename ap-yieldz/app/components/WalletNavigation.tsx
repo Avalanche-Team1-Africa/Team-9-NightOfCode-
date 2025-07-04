@@ -38,7 +38,7 @@ export function WalletNavigation() {
         <div className="flex justify-between items-center h-16">
           <div className="flex items-center">
             <span className="text-2xl font-bold text-green-700">🐊 Alligator</span>
-            <span className="ml-2 text-sm text-gray-500">Cross-Chain Yield Aggregator</span>
+            {/* <span className="ml-2 text-sm text-gray-500">Cross-Chain Yield Aggregator</span> */}
           </div>
 
           {/* Desktop Navigation */}
