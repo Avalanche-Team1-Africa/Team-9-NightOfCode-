@@ -1,44 +1,17 @@
 import { useState, useEffect } from 'react';
 import { APYData } from './useAggregator';
 
-// Mock APY data - In production, this would fetch from Aave and Morpho APIs
-const MOCK_APY_DATA: Record<string, Omit<APYData, 'asset'>> = {
-  'USDC': {
-    symbol: 'USDC',
-    aaveSupplyAPY: 4.25,
-    aaveBorrowAPY: 6.80,
-    morphoSupplyAPY: 5.10,
-    morphoBorrowAPY: 7.20,
-    bestSupplyProtocol: 'morpho',
-    bestBorrowProtocol: 'aave',
-  },
-  'USDT': {
-    symbol: 'USDT',
-    aaveSupplyAPY: 4.15,
-    aaveBorrowAPY: 6.75,
-    morphoSupplyAPY: 4.90,
-    morphoBorrowAPY: 7.15,
-    bestSupplyProtocol: 'morpho',
-    bestBorrowProtocol: 'aave',
-  },
-  'WETH': {
-    symbol: 'WETH',
-    aaveSupplyAPY: 3.80,
-    aaveBorrowAPY: 5.20,
-    morphoSupplyAPY: 4.25,
-    morphoBorrowAPY: 5.85,
-    bestSupplyProtocol: 'morpho',
-    bestBorrowProtocol: 'aave',
-  },
-  'WBTC': {
-    symbol: 'WBTC',
-    aaveSupplyAPY: 2.10,
-    aaveBorrowAPY: 4.50,
-    morphoSupplyAPY: 2.75,
-    morphoBorrowAPY: 4.95,
-    bestSupplyProtocol: 'morpho',
-    bestBorrowProtocol: 'aave',
-  },
+// TODO: Add more sophisticated caching if needed
+// TODO: Add API key to .env.local if required in the future
+const AAVE_API_URL = 'https://aave-api-v2.aave.com/data/rates-history';
+const MORPHO_API_URL = 'https://api.morpho.org/markets';
+
+// Mapping of asset symbols to their respective IDs on Aave
+const AAVE_RESERVE_IDS: Record<string, string> = {
+    'USDC': '0x27f8d03b3a2196956ed754badc28d73be8830a6e',
+    'USDT': '0x83f798e925bcd4017eb265844f99ed486b5794da',
+    'WETH': '0x028171bca77440897b824ca71d1c56cac55b68a3',
+    'WBTC': '0x9ff58f4ffb29fa2266ab25e75e2a8b3503311656',
 };
 
 export function useAPYData() {
@@ -50,23 +23,48 @@ export function useAPYData() {
     const fetchAPYData = async () => {
       try {
         setLoading(true);
+
+        // Fetch from Aave
+        const aaveResponse = await fetch(AAVE_API_URL);
+        if (!aaveResponse.ok) {
+          throw new Error(`Failed to fetch Aave data: ${aaveResponse.statusText}`);
+        }
+        const aaveData = await aaveResponse.json();
+
+        // Fetch from Morpho
+        const morphoResponse = await fetch(MORPHO_API_URL);
+        if (!morphoResponse.ok) {
+            throw new Error(`Failed to fetch Morpho data: ${morphoResponse.statusText}`);
+        }
+        const morphoData = await morphoResponse.json();
         
-        // Simulate API delay
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // In production, you would fetch from actual APIs:
-        // - Aave: https://aave-api-v2.aave.com/data/rates-history
-        // - Morpho: https://api.morpho.org/markets
-        
-        const data: APYData[] = Object.entries(MOCK_APY_DATA).map(([symbol, rates]) => ({
-          asset: symbol.toLowerCase(),
-          ...rates,
-        }));
-        
-        setApyData(data);
+        const combinedData: APYData[] = Object.keys(AAVE_RESERVE_IDS).map(symbol => {
+            const aaveReserveId = AAVE_RESERVE_IDS[symbol];
+            const aaveAssetData = aaveData.find((d: any) => d.reserve.id === aaveReserveId);
+            
+            const morphoAssetData = morphoData.find((d: any) => d.asset.symbol === symbol);
+
+            const aaveSupplyAPY = aaveAssetData ? parseFloat(aaveAssetData.liquidityRate) * 100 : 0;
+            const aaveBorrowAPY = aaveAssetData ? parseFloat(aaveAssetData.variableBorrowRate) * 100 : 0;
+            const morphoSupplyAPY = morphoAssetData ? parseFloat(morphoAssetData.supplyApy) * 100 : 0;
+            const morphoBorrowAPY = morphoAssetData ? parseFloat(morphoAssetData.borrowApy) * 100 : 0;
+
+            return {
+                asset: symbol.toLowerCase(),
+                symbol: symbol,
+                aaveSupplyAPY,
+                aaveBorrowAPY,
+                morphoSupplyAPY,
+                morphoBorrowAPY,
+                bestSupplyProtocol: aaveSupplyAPY > morphoSupplyAPY ? 'aave' : 'morpho',
+                bestBorrowProtocol: aaveBorrowAPY < morphoBorrowAPY ? 'aave' : 'morpho',
+            };
+        });
+
+        setApyData(combinedData);
         setError(null);
-      } catch (err) {
-        setError('Failed to fetch APY data');
+      } catch (err: any) {
+        setError(err.message || 'Failed to fetch APY data');
         console.error('Error fetching APY data:', err);
       } finally {
         setLoading(false);
@@ -104,25 +102,16 @@ export function useHistoricalAPY(asset: string, protocol: 'aave' | 'morpho', day
 
   useEffect(() => {
     const generateMockHistoricalData = () => {
-      const baseSupplyAPY = MOCK_APY_DATA[asset.toUpperCase()]?.[`${protocol}SupplyAPY`] || 4;
-      const baseBorrowAPY = MOCK_APY_DATA[asset.toUpperCase()]?.[`${protocol}BorrowAPY`] || 6;
-      
-      const historicalData = [];
-      for (let i = days; i >= 0; i--) {
+      // TODO: Replace with actual historical data fetching
+      const historicalData = Array.from({ length: days }).map((_, i) => {
         const date = new Date();
-        date.setDate(date.getDate() - i);
-        
-        // Add some random variation
-        const supplyVariation = (Math.random() - 0.5) * 0.5;
-        const borrowVariation = (Math.random() - 0.5) * 0.8;
-        
-        historicalData.push({
+        date.setDate(date.getDate() - (days - i));
+        return {
           date: date.toISOString().split('T')[0],
-          supplyAPY: Math.max(0, baseSupplyAPY + supplyVariation),
-          borrowAPY: Math.max(0, baseBorrowAPY + borrowVariation),
-        });
-      }
-      
+          supplyAPY: 0,
+          borrowAPY: 0,
+        };
+      });
       setData(historicalData);
       setLoading(false);
     };

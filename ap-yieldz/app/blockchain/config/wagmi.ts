@@ -11,7 +11,7 @@ export const config = createConfig({
     walletConnect({ projectId })
   ],
   transports: {
-    [avalanche.id]: http(process.env.NEXT_PUBLIC_AVALANCHE_RPC || 'https://api.avax.network/ext/bc/C/rpc'),
+    [avalanche.id]: http(process.env.NEXT_PUBLIC_AVALANCHE_RPC || 'api.avax-test.network/ext/bc/C/rpcc'),
     [base.id]: http(process.env.NEXT_PUBLIC_BASE_RPC || 'https://mainnet.base.org'),
   },
 });
